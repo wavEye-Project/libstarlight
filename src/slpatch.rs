@@ -2,15 +2,52 @@
 .slpatch and hexpatching handler
 */
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     collections::HashMap,
     fs,
     io::{Error, Read, Seek, SeekFrom},
+    ops::Deref,
+    thread,
 };
 use windows::Win32::System::SystemInformation::*;
 
-pub type PatchData = Vec<(String, String)>;
+#[derive(Serialize, Deserialize)]
+pub struct PatchRegex {
+    #[serde(
+        serialize_with = "serialize_regex",
+        deserialize_with = "deserialize_regex"
+    )]
+    pattern: Regex,
+}
+impl PatchRegex {
+    pub fn new(pattern: Regex) -> Self {
+        PatchRegex { pattern }
+    }
+}
+impl Deref for PatchRegex {
+    type Target = Regex;
+
+    fn deref(&self) -> &Self::Target {
+        &self.pattern
+    }
+}
+fn deserialize_regex<'de, D>(deserializer: D) -> Result<Regex, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let old_pattern: String = Deserialize::deserialize(deserializer)?;
+    let pattern = old_pattern.replace(" ", "").to_lowercase();
+    Regex::new(format!("(?mix){}", pattern).as_str())
+        .map_err(|_| serde::de::Error::custom("Invalid regex pattern"))
+}
+fn serialize_regex<S>(regex: &Regex, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&regex.to_string())
+}
+pub type PatchData = Vec<(PatchRegex, String)>;
 
 #[derive(Serialize, Deserialize)]
 pub struct Patch {
@@ -27,23 +64,20 @@ pub struct PatchRoot {
 }
 
 pub fn open_slpatch(path: &str) -> Result<PatchRoot, Error> {
-    let data: PatchRoot;
-    let res = fs::read_to_string(path)?;
-    data = serde_json::from_str(&res)?;
-    Ok(data)
+    serde_json::from_str(&fs::read_to_string(path)?).map_err(Into::into)
 }
 
 pub fn check_machine(filename: &str) -> Result<String, String> {
     let mut file = fs::File::open(filename).map_err(|_| "Failed to open file".to_string())?;
 
     let mut buffer = [0; 4];
-    let _ = file.seek(SeekFrom::Start(0x3C));
-    _ = file.read_exact(&mut buffer);
+    file.seek(SeekFrom::Start(0x3C)).ok();
+    file.read_exact(&mut buffer).ok();
     let coff_offset = u32::from_le_bytes(buffer);
 
-    _ = file.seek(SeekFrom::Start(coff_offset as u64));
-    _ = file.read_exact(&mut buffer);
-    _ = file.read_exact(&mut buffer);
+    file.seek(SeekFrom::Start(coff_offset as u64)).ok();
+    file.read_exact(&mut buffer).ok();
+    file.read_exact(&mut buffer).ok();
     let machine = u16::from_le_bytes([buffer[0], buffer[1]]);
     match IMAGE_FILE_MACHINE(machine) {
         IMAGE_FILE_MACHINE_AMD64 => Ok("amd64".to_string()),
@@ -56,14 +90,10 @@ pub fn check_machine(filename: &str) -> Result<String, String> {
 
 pub fn patch_module(patches: &PatchData, content: &Vec<u8>) -> Result<Vec<u8>, String> {
     let mut hexdata: String = hex::encode(content);
-    for (_0, _1) in patches {
-        let (pattern, subst) = (
-            _0.replace(" ", "").to_lowercase(),
-            _1.replace(" ", "").to_lowercase(),
-        );
-        let regex = Regex::new(format!("(?mix){}", pattern).as_str())
-            .map_err(|_| "Invalid hex pattern".to_string())?;
+    for (regex, _0) in patches {
+        let subst = _0.replace(" ", "").to_lowercase();
         hexdata = regex.replace_all(&hexdata, subst).to_string();
+        thread::yield_now();
     }
-    hex::decode(&hexdata).map_err(|_| "Patch is corrupt".to_string())
+    hex::decode(&hexdata).map_err(|_| "Patched data is corrupt".to_string())
 }
