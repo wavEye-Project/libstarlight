@@ -7,38 +7,35 @@ use std::{
     collections::HashMap,
     fs,
     io::{Error, Read, Seek, SeekFrom},
-    ops::Deref,
-    thread,
+    ops::Deref
 };
 use windows::Win32::System::SystemInformation::*;
 
 #[derive(Serialize, Deserialize)]
-pub struct PatchRegex {
-    #[serde(
-        serialize_with = "serialize_regex",
-        deserialize_with = "deserialize_regex"
-    )]
-    pattern: Regex,
-}
+pub struct PatchRegex(#[serde(
+    serialize_with = "serialize_regex",
+    deserialize_with = "deserialize_regex"
+)] Regex);
 impl PatchRegex {
     pub fn new(pattern: Regex) -> Self {
-        PatchRegex { pattern }
+        PatchRegex(pattern)
     }
 }
 impl Deref for PatchRegex {
     type Target = Regex;
 
     fn deref(&self) -> &Self::Target {
-        &self.pattern
+        &self.0
     }
 }
+
 fn deserialize_regex<'de, D>(deserializer: D) -> Result<Regex, D::Error>
 where
     D: Deserializer<'de>,
 {
     let old_pattern: String = Deserialize::deserialize(deserializer)?;
     let pattern = old_pattern.replace(" ", "").to_lowercase();
-    Regex::new(format!("(?mix){}", pattern).as_str())
+    Regex::new(format!("(?m){}", pattern).as_str())
         .map_err(|_| serde::de::Error::custom("Invalid regex pattern"))
 }
 fn serialize_regex<S>(regex: &Regex, serializer: S) -> Result<S::Ok, S::Error>
@@ -88,12 +85,13 @@ pub fn check_machine(filename: &str) -> Result<String, String> {
     }
 }
 
+
+// TODO: Fix performance
 pub fn patch_module(patches: &PatchData, content: &Vec<u8>) -> Result<Vec<u8>, String> {
     let mut hexdata: String = hex::encode(content);
     for (regex, _0) in patches {
         let subst = _0.replace(" ", "").to_lowercase();
         hexdata = regex.replace_all(&hexdata, subst).to_string();
-        thread::yield_now();
     }
     hex::decode(&hexdata).map_err(|_| "Patched data is corrupt".to_string())
 }
